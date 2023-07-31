@@ -1,0 +1,645 @@
+import argparse
+import time
+from pathlib import Path
+import cv2
+import torch
+import torch.backends.cudnn as cudnn
+from numpy import random
+
+from models.experimental import attempt_load
+from utils.datasets import LoadStreams, LoadImages
+from utils.general import check_img_size, check_requirements, \
+                check_imshow, non_max_suppression, apply_classifier, \
+                scale_coords, xyxy2xywh, strip_optimizer, set_logging, \
+                increment_path
+from utils.plots import plot_one_box
+from utils.torch_utils import select_device, load_classifier, time_synchronized, TracedModel
+
+#For SORT tracking
+import skimage
+from sort import *
+import pickle
+
+#............................... Tracker Functions ............................
+""" Random created palette"""
+palette = (2 ** 11 - 1, 2 ** 15 - 1, 2 ** 20 - 1)
+
+area1_pointA = (300,100)
+area1_pointB = (300,600)
+area1_pointC = (340,100)
+area1_pointD = (340,600)
+
+area2_pointA = (340, 100)
+area2_pointB = (340, 600)
+area2_pointC = (380, 100)  
+area2_pointD = (380, 600)  
+
+area3_pointA = (380, 100)
+area3_pointB = (380, 600)
+area3_pointC = (420, 100)  
+area3_pointD = (420, 600)  
+
+area4_pointA = (420, 100)
+area4_pointB = (420, 600)
+area4_pointC = (460, 100)  
+area4_pointD = (460, 600)  
+
+area5_pointA = (460, 100)
+area5_pointB = (460, 600)
+area5_pointC = (500, 100)  
+area5_pointD = (500, 600)  
+
+area6_pointA = (500,100)
+area6_pointB = (500,600)
+area6_pointC = (540,100)
+area6_pointD = (540,600)
+
+area7_pointA = (540, 100)
+area7_pointB = (540, 600)
+area7_pointC = (580, 100)  
+area7_pointD = (580, 600)  
+
+area8_pointA = (580, 100)
+area8_pointB = (580, 600)
+area8_pointC = (620, 100)  
+area8_pointD = (620, 600)  
+
+area9_pointA = (620, 100)
+area9_pointB = (620, 600)
+area9_pointC = (660, 100)  
+area9_pointD = (660, 600)  
+
+area10_pointA = (660, 100)
+area10_pointB = (660, 600)
+area10_pointC = (700, 100)  
+area10_pointD = (700, 600) 
+
+
+#vehicles total counting variables
+array_ids = []
+counting_area1 = 0
+counting_area2 = 0
+counting_area3 = 0
+counting_area4 = 0
+counting_area5 = 0
+counting_area6 = 0
+counting_area7 = 0
+counting_area8 = 0
+counting_area9 = 0
+counting_area10 = 0
+#-----------------------------------------------------------------------------------------------
+#이중도금 판별 카운팅 변수 생성
+double_plating_count = 0
+#-----------------------------------------------------------------------------------------------
+modulo_counting = 0
+
+area1_object_ids_original = set()
+area2_object_ids_original = set()
+area3_object_ids_original = set()
+area4_object_ids_original = set()
+area5_object_ids_original = set()
+area6_object_ids_original = set()
+area7_object_ids_original = set()
+area8_object_ids_original = set()
+area9_object_ids_original = set()
+area10_object_ids_original = set()
+
+area_set = [area1_object_ids_original,area2_object_ids_original,area3_object_ids_original,area4_object_ids_original,area5_object_ids_original
+            ,area6_object_ids_original,area7_object_ids_original,area8_object_ids_original,area9_object_ids_original,area10_object_ids_original]
+
+# 모든 집합에 해당 ID가 들어있는지 검사하는 함수
+def check_for_id(sets):
+    if len(sets) == 0:
+        return 0, None
+
+    common_elements = set.intersection(*sets)
+    if len(common_elements) > 0:
+        common_element = list(common_elements)[0]  # 세트를 리스트로 변환 후 첫 번째 원소 추출
+        return 1, common_element
+    else:
+        return 0, None
+#-----------------------------------------------------------------------------------------------
+#이중도금 판별 카운팅 리스트 생성
+double_plating_ids = set()
+double_plating_time = []
+#-----------------------------------------------------------------------------------------------
+
+
+
+"""" Calculates the relative bounding box from absolute pixel values. """
+def bbox_rel(*xyxy):
+    bbox_left = min([xyxy[0].item(), xyxy[2].item()])
+    bbox_top = min([xyxy[1].item(), xyxy[3].item()])
+    bbox_w = abs(xyxy[0].item() - xyxy[2].item())
+    bbox_h = abs(xyxy[1].item() - xyxy[3].item())
+    x_c = (bbox_left + bbox_w / 2)
+    y_c = (bbox_top + bbox_h / 2)
+    w = bbox_w
+    h = bbox_h
+    return x_c, y_c, w, h
+
+# """Simple function that adds fixed color depending on the class"""
+def compute_color_for_labels(label):
+    color = [int((p * (label ** 2 - label + 1)) % 255) for p in palette]
+    return tuple(color)
+
+# # Function to Draw Bounding boxes
+def draw_boxes(img, bbox, identities=None, categories=None, names=None, offset=(0, 0)):
+    global counting_area1, counting_area2 ,counting_area3 ,counting_area4 ,counting_area5 ,counting_area6 ,counting_area7 ,counting_area8 ,counting_area9 ,counting_area10  
+    global double_plating_count # To check double_plating_count
+    global array_ids  # To modify the global array_ids variable
+    global area1_object_ids ,area2_object_ids ,area3_object_ids ,area4_object_ids ,area5_object_ids ,area6_object_ids ,area7_object_ids ,area8_object_ids ,area9_object_ids ,area10_object_ids
+    global double_plating_ids # 이중 도금 판별시 객체 id 저장 
+    global double_plating_time # 이중 도금 판별시 시간 저장
+
+    area1_object_ids = set()
+    area2_object_ids = set()
+    area3_object_ids = set()
+    area4_object_ids = set()
+    area5_object_ids = set()
+    area6_object_ids = set()
+    area7_object_ids = set()
+    area8_object_ids = set()
+    area9_object_ids = set()
+    area10_object_ids = set()
+    
+    for i, box in enumerate(bbox):
+        x1, y1, x2, y2 = [int(i) for i in box]
+        x1 += offset[0]
+        x2 += offset[0]
+        y1 += offset[1]
+        y2 += offset[1]
+        cat = int(categories[i]) if categories is not None else 0
+        id = int(identities[i]) if identities is not None else 0
+        color = compute_color_for_labels(id)
+        data = (int((box[0] + box[2]) / 2), (int((box[1] + box[3]) / 2)))
+        label = str(id) + ":" + names[cat]
+        (w, h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
+        if names[cat] == 'BAR2' :
+            cv2.rectangle(img, (x1, y1), (x2, y2), (255, 144, 30), 1)
+            
+        # class = rack 만 라벨 설정
+        if names[cat] == 'RACK' :
+            cv2.putText(img, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, [255, 255, 255], 1) # counting area 
+
+        # Calculate the midpoint of the bounding box
+        midpoint_x = x1 + ((x2 - x1) / 2)
+        midpoint_y = y1 + ((y2 - y1) / 2)
+        center_point = (int(midpoint_x), int(midpoint_y))
+        midpoint_color = (0, 255, 0)
+
+        # Check if the midpoint lies within Area 1
+        if (midpoint_x > area1_pointA[0] and midpoint_x < area1_pointD[0]) and \
+           (midpoint_y > area1_pointA[1] and midpoint_y < area1_pointD[1]):
+            midpoint_color = (0, 0, 255)
+            print('Area 1 - Category: ' + str(cat))
+
+            # Add vehicles counting
+            if names[cat] == 'BAR2' and id not in area1_object_ids:
+                area1_object_ids.add(id)
+                area1_object_ids_original.add(id)
+                counting_area1 = len(area1_object_ids)  # Update the count for Area 1
+                print("출력합니다",area1_object_ids)
+
+        # Check if the midpoint lies within Area 2
+        if (midpoint_x > area2_pointA[0] and midpoint_x < area2_pointD[0]) and \
+           (midpoint_y > area2_pointA[1] and midpoint_y < area2_pointD[1]):
+            midpoint_color = (0, 0, 255)
+            print('Area 2 - Category: ' + str(cat))
+
+            # Add vehicles counting
+            if names[cat] == 'BAR2' and id not in area2_object_ids:
+                area2_object_ids.add(id)
+                area2_object_ids_original.add(id)
+                counting_area2 = len(area2_object_ids)  # Update the count for Area 2
+
+        # Check if the midpoint lies within Area 3
+        if (midpoint_x > area3_pointA[0] and midpoint_x < area3_pointD[0]) and \
+           (midpoint_y > area3_pointA[1] and midpoint_y < area3_pointD[1]):
+            midpoint_color = (0, 0, 255)
+            print('Area 3 - Category: ' + str(cat))
+
+            # Add vehicles counting
+            if names[cat] == 'BAR2' and id not in area3_object_ids:
+                area3_object_ids.add(id)
+                area3_object_ids_original.add(id)
+                counting_area3 = len(area3_object_ids)  # Update the count for Area 3
+
+        # Check if the midpoint lies within Area 4
+        if (midpoint_x > area4_pointA[0] and midpoint_x < area4_pointD[0]) and \
+           (midpoint_y > area4_pointA[1] and midpoint_y < area4_pointD[1]):
+            midpoint_color = (0, 0, 255)
+            print('Area 4 - Category: ' + str(cat))
+
+            # Add vehicles counting
+            if names[cat] == 'BAR2' and id not in area4_object_ids:
+                area4_object_ids.add(id)
+                area4_object_ids_original.add(id)
+                counting_area4 = len(area4_object_ids)  # Update the count for Area 4
+
+        # Check if the midpoint lies within Area 5
+        if (midpoint_x > area5_pointA[0] and midpoint_x < area5_pointD[0]) and \
+           (midpoint_y > area5_pointA[1] and midpoint_y < area5_pointD[1]):
+            midpoint_color = (0, 0, 255)
+            print('Area 5 - Category: ' + str(cat))
+
+            # Add vehicles counting
+            if names[cat] == 'BAR2' and id not in area5_object_ids:
+                area5_object_ids.add(id)
+                area5_object_ids_original.add(id)
+                counting_area5 = len(area5_object_ids)  # Update the count for Area 5
+                
+        # Check if the midpoint lies within Area 6
+        if (midpoint_x > area6_pointA[0] and midpoint_x < area6_pointD[0]) and \
+           (midpoint_y > area6_pointA[1] and midpoint_y < area6_pointD[1]):
+            midpoint_color = (0, 0, 255)
+            print('Area 6 - Category: ' + str(cat))
+
+            # Add vehicles counting
+            if names[cat] == 'BAR2' and id not in area6_object_ids:
+                area6_object_ids.add(id)
+                area6_object_ids_original.add(id)
+                counting_area6 = len(area6_object_ids)  # Update the count for Area 6
+                
+        # Check if the midpoint lies within Area 7
+        if (midpoint_x > area7_pointA[0] and midpoint_x < area7_pointD[0]) and \
+           (midpoint_y > area7_pointA[1] and midpoint_y < area7_pointD[1]):
+            midpoint_color = (0, 0, 255)
+            print('Area 7 - Category: ' + str(cat))
+
+            # Add vehicles counting
+            if names[cat] == 'BAR2' and id not in area7_object_ids:
+                area7_object_ids.add(id)
+                area7_object_ids_original.add(id)
+                counting_area7 = len(area7_object_ids)  # Update the count for Area 7
+
+        # Check if the midpoint lies within Area 8
+        if (midpoint_x > area8_pointA[0] and midpoint_x < area8_pointD[0]) and \
+           (midpoint_y > area8_pointA[1] and midpoint_y < area8_pointD[1]):
+            midpoint_color = (0, 0, 255)
+            print('Area 8 - Category: ' + str(cat))
+
+            # Add vehicles counting
+            if names[cat] == 'BAR2' and id not in area8_object_ids:
+                area8_object_ids.add(id)
+                area8_object_ids_original.add(id)
+                counting_area8 = len(area8_object_ids)  # Update the count for Area 8
+
+        # Check if the midpoint lies within Area 9
+        if (midpoint_x > area9_pointA[0] and midpoint_x < area9_pointD[0]) and \
+           (midpoint_y > area9_pointA[1] and midpoint_y < area9_pointD[1]):
+            midpoint_color = (0, 0, 255)
+            print('Area 9 - Category: ' + str(cat))
+
+            # Add vehicles counting
+            if names[cat] == 'BAR2' and id not in area9_object_ids:
+                area9_object_ids.add(id)
+                area9_object_ids_original.add(id)
+                counting_area9 = len(area9_object_ids)  # Update the count for Area 9
+
+        # Check if the midpoint lies within Area 10
+        if (midpoint_x > area10_pointA[0] and midpoint_x < area10_pointD[0]) and \
+           (midpoint_y > area10_pointA[1] and midpoint_y < area10_pointD[1]):
+            midpoint_color = (0, 0, 255)
+            print('Area 10 - Category: ' + str(cat))
+
+            # Add vehicles counting
+            if names[cat] == 'BAR2' and id not in area10_object_ids:
+                area10_object_ids.add(id)
+                area10_object_ids_original.add(id)
+                counting_area10 = len(area10_object_ids)  # Update the count for Area 10
+                
+        if names[cat] == 'BAR2' :
+            cv2.circle(img, center_point, radius=1, color=midpoint_color, thickness=2)
+            
+        check_point, result = check_for_id(area_set)
+        
+        if check_point == 1 :
+            double_plating_ids.add(result)
+        
+        if names[cat] == 'BAR2' and id == result :
+            cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 255), 1)
+
+    counting_area1 = len(area1_object_ids)
+    counting_area2 = len(area2_object_ids)
+    counting_area3 = len(area3_object_ids)
+    counting_area4 = len(area4_object_ids)
+    counting_area5 = len(area5_object_ids)
+    counting_area6 = len(area6_object_ids)
+    counting_area7 = len(area7_object_ids)
+    counting_area8 = len(area8_object_ids)
+    counting_area9 = len(area9_object_ids)
+    counting_area10 = len(area10_object_ids)
+    double_plating_count = len(double_plating_ids)
+
+    print("Total objects entering Area 1:", counting_area1)
+    print("Total objects entering Area 2:", counting_area2)
+    print("Total objects entering Area 3:", counting_area3)
+    print("Total objects entering Area 4:", counting_area4)
+    print("Total objects entering Area 5:", counting_area5)
+    print("Total objects entering Area 6:", counting_area6)
+    print("Total objects entering Area 7:", counting_area7)
+    print("Total objects entering Area 8:", counting_area8)
+    print("Total objects entering Area 9:", counting_area9)
+    print("Total objects entering Area 10:", counting_area10)
+
+    return img
+
+#..............................................................................
+
+
+def detect(save_img=False):
+    source, weights, view_img, save_txt, imgsz, trace = opt.source, opt.weights, opt.view_img, opt.save_txt, opt.img_size, not opt.no_trace
+    save_img = not opt.nosave and not source.endswith('.txt')  # save inference images
+    webcam = source.isnumeric() or source.endswith('.txt') or source.lower().startswith(
+        ('rtsp://', 'rtmp://', 'http://', 'https://'))
+
+    #.... Initialize SORT .... 
+    #......................... 
+    sort_max_age = 5 
+    sort_min_hits = 2
+    sort_iou_thresh = 0.2
+    sort_tracker = Sort(max_age=sort_max_age,
+                       min_hits=sort_min_hits,
+                       iou_threshold=sort_iou_thresh) 
+    #......................... 
+    # Directories
+    save_dir = Path(increment_path(Path(opt.project) / opt.name, exist_ok=opt.exist_ok))  # increment run
+    (save_dir / 'labels' if save_txt else save_dir).mkdir(parents=True, exist_ok=True)  # make dir
+
+    # Initialize
+    set_logging()
+    device = select_device(opt.device)
+    half = device.type != 'cpu'  # half precision only supported on CUDA
+    half = False
+
+    # Load model
+    model = attempt_load(weights, map_location=device)  # load FP32 model
+    stride = int(model.stride.max())  # model stride
+    imgsz = check_img_size(imgsz, s=stride)  # check img_size
+
+    if trace:
+        model = TracedModel(model, device, opt.img_size)
+
+    if half:
+        model.half()  # to FP16
+
+    # Second-stage classifier
+    classify = False
+    if classify:
+        modelc = load_classifier(name='resnet101', n=2)  # initialize
+        modelc.load_state_dict(torch.load('weights/resnet101.pt', map_location=device)['model']).to(device).eval()
+
+    # Set Dataloader
+    vid_path, vid_writer = None, None
+    if webcam:
+        view_img = check_imshow()
+        cudnn.benchmark = True  # set True to speed up constant image size inference
+        dataset = LoadStreams(source, img_size=imgsz, stride=stride)
+    else:
+        dataset = LoadImages(source, img_size=imgsz, stride=stride)
+
+    # Get names and colors
+    names = model.module.names if hasattr(model, 'module') else model.names
+    colors = [[random.randint(0, 255) for _ in range(3)] for _ in names]
+
+    # Run inference
+    if device.type != 'cpu':
+        model(torch.zeros(1, 3, imgsz, imgsz).to(device).type_as(next(model.parameters())))  # run once
+    old_img_w = old_img_h = imgsz
+    old_img_b = 1
+   
+    t0 = time.time()
+    for path, img, im0s, vid_cap in dataset:
+        img = torch.from_numpy(img).to(device)
+        img = img.half() if half else img.float()  # uint8 to fp16/32
+        img /= 255.0  # 0 - 255 to 0.0 - 1.0
+        if img.ndimension() == 3:
+            img = img.unsqueeze(0)
+
+        # Warmup
+        if device.type != 'cpu' and (old_img_b != img.shape[0] or old_img_h != img.shape[2] or old_img_w != img.shape[3]):
+            old_img_b = img.shape[0]
+            old_img_h = img.shape[2]
+            old_img_w = img.shape[3]
+            for i in range(3):
+                model(img, augment=opt.augment)[0]
+
+        # Inference
+        t1 = time_synchronized()
+        pred = model(img, augment=opt.augment)[0]
+        t2 = time_synchronized()
+
+        # Apply NMS
+        pred = non_max_suppression(pred, opt.conf_thres, opt.iou_thres, classes=opt.classes, agnostic=opt.agnostic_nms)
+        t3 = time_synchronized()
+
+        # Apply Classifier
+        if classify:
+            pred = apply_classifier(pred, modelc, img, im0s)
+
+        # Process detections
+        for i, det in enumerate(pred):  # detections per image
+            if webcam:  # batch_size >= 1
+                p, s, im0, frame = path[i], '%g: ' % i, im0s[i].copy(), dataset.count
+            else:
+                p, s, im0, frame = path, '', im0s, getattr(dataset, 'frame', 0)
+
+            p = Path(p)  # to Path
+            save_path = str(save_dir / p.name)  # img.jpg
+            txt_path = str(save_dir / 'labels' / p.stem) + ('' if dataset.mode == 'image' else f'_{frame}')  # img.txt
+            gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  # normalization gain whwh
+            if len(det):
+                # Rescale boxes from img_size to im0 size
+                det[:, :4] = scale_coords(img.shape[2:], det[:, :4], im0.shape).round()
+
+                # Print results
+                for c in det[:, -1].unique():
+                    n = (det[:, -1] == c).sum()  # detections per class
+                    s += f"{n} {names[int(c)]}{'s' * (n > 1)}, "  # add to string
+
+                #..................USE TRACK FUNCTION....................
+                #pass an empty array to sort
+                dets_to_sort = np.empty((0,6))
+
+                # NOTE: We send in detected object class too
+                for x1,y1,x2,y2,conf,detclass in det.cpu().detach().numpy():
+                    dets_to_sort = np.vstack((dets_to_sort, 
+                                np.array([x1, y1, x2, y2, conf, detclass])))
+                        
+                # Run SORT
+                tracked_dets = sort_tracker.update(dets_to_sort)
+                tracks =sort_tracker.getTrackers()
+                
+                print('Tracked Detections : '+ str(len(tracked_dets)))
+
+                # draw boxes for visualization
+                if len(tracked_dets)>0:
+                    bbox_xyxy = tracked_dets[:,:4]
+                    identities = tracked_dets[:, 8]
+                    categories = tracked_dets[:, 4]
+                    draw_boxes(im0, bbox_xyxy, identities, categories, names)
+                    print('Bbox xy count : '+str(len(bbox_xyxy)))
+                #........................................................
+                
+            # Print time (inference + NMS)
+            print(f'{s}Done. ({(1E3 * (t2 - t1)):.1f}ms) Inference, ({(1E3 * (t3 - t2)):.1f}ms) NMS')
+
+            # Draw lines for area
+            cv2.line(im0, area1_pointA, area1_pointB, (0, 255, 0), 2)
+            cv2.line(im0, area1_pointB, area1_pointD, (0, 255, 0), 2)
+            cv2.line(im0, area1_pointC, area1_pointD, (0, 255, 0), 2)
+            cv2.line(im0, area1_pointA, area1_pointC, (0, 255, 0), 2)
+
+            cv2.line(im0, area2_pointA, area2_pointB, (0, 255, 0), 2)
+            cv2.line(im0, area2_pointB, area2_pointD, (0, 255, 0), 2)
+            cv2.line(im0, area2_pointC, area2_pointD, (0, 255, 0), 2)
+            cv2.line(im0, area2_pointA, area2_pointC, (0, 255, 0), 2)
+
+            cv2.line(im0, area3_pointA, area3_pointB, (51, 255, 0), 2)
+            cv2.line(im0, area3_pointB, area3_pointD, (51, 255, 0), 2)
+            cv2.line(im0, area3_pointC, area3_pointD, (51, 255, 0), 2)
+            cv2.line(im0, area3_pointA, area3_pointC, (51, 255, 0), 2)
+
+            cv2.line(im0, area4_pointA, area4_pointB, (51, 255, 0), 2)
+            cv2.line(im0, area4_pointB, area4_pointD, (51, 255, 0), 2)
+            cv2.line(im0, area4_pointC, area4_pointD, (51, 255, 0), 2)
+            cv2.line(im0, area4_pointA, area4_pointC, (51, 255, 0), 2)
+
+            cv2.line(im0, area5_pointA, area5_pointB, (102, 255, 0), 2)
+            cv2.line(im0, area5_pointB, area5_pointD, (102, 255, 0), 2)
+            cv2.line(im0, area5_pointC, area5_pointD, (102, 255, 0), 2)
+            cv2.line(im0, area5_pointA, area5_pointC, (102, 255, 0), 2)
+            
+            cv2.line(im0, area6_pointA, area6_pointB, (102, 255, 0), 2)
+            cv2.line(im0, area6_pointB, area6_pointD, (102, 255, 0), 2)
+            cv2.line(im0, area6_pointC, area6_pointD, (102, 255, 0), 2)
+            cv2.line(im0, area6_pointA, area6_pointC, (102, 255, 0), 2)
+
+            cv2.line(im0, area7_pointA, area7_pointB, (153, 255, 0), 2)
+            cv2.line(im0, area7_pointB, area7_pointD, (153, 255, 0), 2)
+            cv2.line(im0, area7_pointC, area7_pointD, (153, 255, 0), 2)
+            cv2.line(im0, area7_pointA, area7_pointC, (153, 255, 0), 2)
+
+            cv2.line(im0, area8_pointA, area8_pointB, (153, 255, 0), 2)
+            cv2.line(im0, area8_pointB, area8_pointD, (153, 255, 0), 2)
+            cv2.line(im0, area8_pointC, area8_pointD, (153, 255, 0), 2)
+            cv2.line(im0, area8_pointA, area8_pointC, (153, 255, 0), 2)
+
+            cv2.line(im0, area9_pointA, area9_pointB, (204, 255, 0), 2)
+            cv2.line(im0, area9_pointB, area9_pointD, (204, 255, 0), 2)
+            cv2.line(im0, area9_pointC, area9_pointD, (204, 255, 0), 2)
+            cv2.line(im0, area9_pointA, area9_pointC, (204, 255, 0), 2)
+
+            cv2.line(im0, area10_pointA, area10_pointB, (204, 255, 0), 2)
+            cv2.line(im0, area10_pointB, area10_pointD, (204, 255, 0), 2)
+            cv2.line(im0, area10_pointC, area10_pointD, (204, 255, 0), 2)
+            cv2.line(im0, area10_pointA, area10_pointC, (204, 255, 0), 2)
+
+
+            color = (255,255,0)
+            detect_color = (0,0,255)
+            thickness = 2
+            fontScale = 1
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            # org = (160,570)
+
+            org_area1 = (900, 390)
+            org_area2 = (900, 420)
+            org_area3 = (900, 450)
+            org_area4 = (900, 480)
+            org_area5 = (900, 510)
+            org_area6 = (900, 540)
+            org_area7 = (900, 570)
+            org_area8 = (900, 600)
+            org_area9 = (900, 630)
+            org_area10 = (900, 660)
+            org_area11 = (900, 690)
+         
+            # cv2.putText(im0, 'Vehicle Counting = '+str(counting), org, font, fontScale, color, thickness, cv2.LINE_AA)            
+            
+            # area1와 area2의 카운트를 이미지 상에 표시합니다.
+            cv2.putText(im0, 'Area1 Count = ' + str(counting_area1), org_area1, font, fontScale, (0, 255, 0), thickness, cv2.LINE_AA)
+            cv2.putText(im0, 'Area2 Count = ' + str(counting_area2), org_area2, font, fontScale, (0, 255, 0), thickness, cv2.LINE_AA)
+            cv2.putText(im0, 'Area3 Count = ' + str(counting_area3), org_area3, font, fontScale, (51, 255, 0), thickness, cv2.LINE_AA)
+            cv2.putText(im0, 'Area4 Count = ' + str(counting_area4), org_area4, font, fontScale, (51, 255, 0), thickness, cv2.LINE_AA)
+            cv2.putText(im0, 'Area5 Count = ' + str(counting_area5), org_area5, font, fontScale, (102, 255, 0), thickness, cv2.LINE_AA)
+            cv2.putText(im0, 'Area6 Count = ' + str(counting_area6), org_area6, font, fontScale, (102, 255, 0), thickness, cv2.LINE_AA)
+            cv2.putText(im0, 'Area7 Count = ' + str(counting_area7), org_area7, font, fontScale, (153, 255, 0), thickness, cv2.LINE_AA)
+            cv2.putText(im0, 'Area8 Count = ' + str(counting_area8), org_area8, font, fontScale, (153, 255, 0), thickness, cv2.LINE_AA)
+            cv2.putText(im0, 'Area9 Count = ' + str(counting_area9), org_area9, font, fontScale, (204, 255, 0), thickness, cv2.LINE_AA)
+            cv2.putText(im0, 'Area10 Count = ' + str(counting_area10), org_area10, font, fontScale, (204, 255, 0), thickness, cv2.LINE_AA)
+            cv2.putText(im0, 'Dobule Plating = ' + str(double_plating_count), org_area11, font, fontScale, detect_color, thickness, cv2.LINE_AA)
+
+
+
+            # Stream results
+            if view_img:
+                cv2.imshow(str(p), im0)
+                cv2.waitKey(1)  # 1 millisecond
+
+            # Save results (image with detections)
+            if save_img:
+                if dataset.mode == 'image':
+                    cv2.imwrite(save_path, im0)
+                    print(f" The image with the result is saved in: {save_path}")
+                else:  # 'video' or 'stream'
+                    if vid_path != save_path:  # new video
+                        vid_path = save_path
+                        if isinstance(vid_writer, cv2.VideoWriter):
+                            vid_writer.release()  # release previous video writer
+                        if vid_cap:  # video
+                            fps = vid_cap.get(cv2.CAP_PROP_FPS)
+                            w = int(vid_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                            h = int(vid_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                        else:  # stream
+                            fps, w, h = 30, im0.shape[1], im0.shape[0]
+                            save_path += '.mp4'
+                        vid_writer = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
+                    vid_writer.write(im0)
+
+    if save_txt or save_img:
+        s = f"\n{len(list(save_dir.glob('labels/*.txt')))} labels saved to {save_dir / 'labels'}" if save_txt else ''
+        #print(f"Results saved to {save_dir}{s}")
+
+    print(f'Done. ({time.time() - t0:.3f}s)')
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--weights', nargs='+', type=str, default='best.pt', help='model.pt path(s)')
+    parser.add_argument('--source', type=str, default='inference/images', help='source')  # file/folder, 0 for webcam
+    parser.add_argument('--img-size', type=int, default=720, help='inference size (pixels)')
+    parser.add_argument('--conf-thres', type=float, default=0.04, help='object confidence threshold')
+    parser.add_argument('--iou-thres', type=float, default=0.45, help='IOU threshold for NMS')
+    parser.add_argument('--device', default='', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
+    parser.add_argument('--view-img', action='store_true', help='display results')
+    parser.add_argument('--save-txt', action='store_true', help='save results to *.txt')
+    parser.add_argument('--save-conf', action='store_true', help='save confidences in --save-txt labels')
+    parser.add_argument('--nosave', action='store_true', help='do not save images/videos')
+    parser.add_argument('--classes', nargs='+', type=int, help='filter by class: --class 0, or --class 0 2 3')
+    parser.add_argument('--agnostic-nms', action='store_true', help='class-agnostic NMS')
+    parser.add_argument('--augment', action='store_true', help='augmented inference')
+    parser.add_argument('--update', action='store_true', help='update all models')
+    parser.add_argument('--project', default='runs/detect', help='save results to project/name')
+    parser.add_argument('--name', default='object_tracking', help='save results to project/name')
+    parser.add_argument('--exist-ok', action='store_true', help='existing project/name ok, do not increment')
+    parser.add_argument('--no-trace', action='store_true', help='don`t trace model')
+    opt = parser.parse_args()
+
+    #check_requirements(exclude=('pycocotools', 'thop'))
+
+    with torch.no_grad():
+        if opt.update:  # update all models (to fix SourceChangeWarning)
+            for opt.weights in ['best.pt']:
+                detect()
+                strip_optimizer(opt.weights)
+                
+        else:
+            detect()
+        
+    # double_plating_count 값을 파일로 저장
+    with open('double_plating_count.pkl', 'wb') as f:
+        pickle.dump(double_plating_count, f)
+            
+#python original_test.py --weights nice.pt --no-trace --view-img --nosave --source (실행파일.확장자) --device 0
